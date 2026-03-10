@@ -169,8 +169,8 @@ Not applicable.
 
 ### Section 1. Task document template (tasks.md)
 
-1. **[Low]** Lines 94–107: [Section 1.2 "Create a `Lab Task` issue"](lab/tasks/required/task-1.md#12-create-a-lab-task-issue) includes branch creation instructions and a naming explanation. The template (tasks.md lines 89–91) specifies that step 1.2 should contain only the issue title. Branch creation belongs in a dedicated step or is covered by the git workflow reference in step 1.1.
-   **Suggested fix:** Move branch creation to a separate step (e.g., 1.3) or to the git workflow wiki.
+1. ~~**[Low]** Lines 94–107: [Section 1.2 "Create a `Lab Task` issue"](lab/tasks/required/task-1.md#12-create-a-lab-task-issue) includes branch creation instructions and a naming explanation. The template (tasks.md lines 89–91) specifies that step 1.2 should contain only the issue title. Branch creation belongs in a dedicated step or is covered by the git workflow reference in step 1.1.
+   **Suggested fix:** Move branch creation to a separate step (e.g., 1.3) or to the git workflow wiki.~~
 
 ### Recovery guidance (tasks.md 4.19)
 
@@ -199,9 +199,9 @@ No empty sections found.
 | Conceptual [Low] | 1 |
 | Convention [High] | 0 |
 | Convention [Medium] | 0 |
-| Convention [Low] | 2 |
+| Convention [Low] | 1 |
 | TODOs | 0 |
 | Empty sections | 0 |
-| **Total** | **3** |
+| **Total** | **2** |
 
-**Overall:** The remaining issues are one conceptual (author decision required) plus two low-severity convention findings. Step 1.2 includes branch creation instructions that the template reserves for a dedicated step (Section 1 finding), and one borderline compound instruction in step 1.4.3 could optionally be split (4.1 finding). All high and medium violations have been fixed.
+**Overall:** The remaining issues are one conceptual (author decision required) plus one low-severity convention finding. One borderline compound instruction in step 1.4.3 could optionally be split (4.1 finding). All high and medium violations have been fixed.

@@ -91,21 +91,6 @@ Follow the [`Git workflow`](../../../wiki/git-workflow.md) to complete this task
    [Task] Build the Data Pipeline
    ```
 
-2. To create a branch for the task,
-
-   [run in the `VS Code Terminal`](../../../wiki/vs-code.md#run-a-command-in-the-vs-code-terminal):
-
-   ```terminal
-   git checkout main
-   git pull origin main
-   git checkout -b task/1-build-data-pipeline
-   ```
-
-   We named the branch `task/1-build-data-pipeline` because:
-   - The issue number (`1`) ties the branch to the task issue directly.
-   - The short title (`build-data-pipeline`) makes branch purpose clear in PR lists and `Git` history.
-   - The pattern reduces naming collisions across the team.
-
 ### 1.3. Part A: Explore the API
 
 <!-- no toc -->
