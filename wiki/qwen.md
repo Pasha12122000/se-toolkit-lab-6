@@ -104,8 +104,7 @@ The file must be non-empty.
 > [!NOTE]
 > See [CLI](./cli.md#what-is-a-cli).
 
-1. [Open a new `VS Code Terminal`](./vs-code.md#open-a-new-vs-code-terminal).
-2. [Run in the `VS Code Terminal`](./vs-code.md#run-a-command-in-the-vs-code-terminal):
+1. [Run in the `VS Code Terminal`](./vs-code.md#run-a-command-in-the-vs-code-terminal):
 
    ```terminal
    qwen
