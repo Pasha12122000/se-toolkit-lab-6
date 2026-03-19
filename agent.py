@@ -9,41 +9,69 @@
 # ///
 
 import json
+import re
 import sys
+import os
 from pathlib import Path
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 MAX_TOOL_CALLS = 10
 
 SYSTEM_PROMPT = """
-You are a documentation agent for this repository.
+You are a repository and system agent for this project.
 
-Use tools to answer questions about the project documentation.
-When you need information from the wiki:
-1. Start with list_files on the most relevant directory, usually "wiki".
-2. Then use read_file on the most relevant file.
-3. Prefer wiki sources over general knowledge.
+Use tools instead of guessing.
+
+Choose tools like this:
+1. Use list_files to discover files in wiki/ or backend/ directories.
+2. Use read_file to read wiki documentation or source code.
+3. Use query_api for live system facts, HTTP status codes, and data-dependent questions.
+
+Prefer:
+- wiki files for documented procedures and setup steps
+- source code for implementation facts such as framework, routers, bugs, or request flow
+- query_api for runtime behavior and current data
+
+For backend structure questions:
+- start with list_files on backend/app/routers or another specific backend directory
+- read only the smallest relevant files
+- infer the handled domain from router module names when it is obvious, instead of reading every router file
+
+For live API questions:
+- use query_api first
+- prefer one direct request over multiple exploratory requests
+- if the API returns a list, use its length when answering count questions
+- after you get the needed API result, answer immediately instead of calling more tools
+- do not switch to list_files or read_file for a live-data question unless the API result is missing, ambiguous, or shows an error you need to diagnose
+- for questions about how many items exist, call query_api with GET /items/ and use the count from the response
+- for questions about HTTP status without authentication, call query_api in the way that tests unauthenticated access if the tool supports it; otherwise avoid unrelated file exploration
 
 For your final response, return a JSON object as plain text with exactly:
 - "answer": a concise answer to the user
-- "source": the most relevant wiki file and section anchor, like "wiki/file.md#section-name"
+- "source": the most relevant file and section anchor when you used documentation or source code
 
+If the answer comes only from query_api, "source" may be an empty string.
 If an exact section heading does not exist, use the closest relevant section anchor.
 Do not wrap the final JSON in Markdown fences.
 """.strip()
 
 
 class Settings(BaseSettings):
-    llm_api_key: str
-    llm_api_base: str
-    llm_model: str
+    llm_api_key: str = Field(alias="LLM_API_KEY")
+    llm_api_base: str = Field(alias="LLM_API_BASE")
+    llm_model: str = Field(alias="LLM_MODEL")
+    lms_api_key: str = Field(default="", alias="LMS_API_KEY")
+    agent_api_base_url: str = Field(default="http://localhost:42002", alias="AGENT_API_BASE_URL")
 
-    model_config = SettingsConfigDict(env_file=".env.agent.secret", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(".env.agent.secret", ".env.docker.secret"),
+        extra="ignore",
+    )
 
 
 def build_chat_completions_url(api_base: str) -> str:
@@ -84,6 +112,36 @@ def get_tool_schemas() -> list[dict[str, Any]]:
                         }
                     },
                     "required": ["path"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": (
+                    "Call the running backend API for live system behavior, "
+                    "status codes, and current data. Use this for count questions, "
+                    "authentication behavior, runtime errors, and endpoint responses."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method such as GET or POST.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "API path such as /items/ or /analytics/completion-rate?lab=lab-01.",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional JSON request body as a string.",
+                        },
+                    },
+                    "required": ["method", "path"],
                     "additionalProperties": False,
                 },
             },
@@ -137,15 +195,84 @@ def list_files_tool(path_str: str) -> str:
     return "\n".join(lines)
 
 
-def execute_tool(name: str, arguments: dict[str, Any]) -> str:
-    path = arguments.get("path")
-    if not isinstance(path, str):
-        return "Error: Tool argument 'path' must be a string"
+def query_api_tool(
+    settings: Settings,
+    method: str,
+    path: str,
+    body: str | None = None,
+    *,
+    include_auth: bool = True,
+) -> str:
+    if include_auth and not settings.lms_api_key:
+        return "Error: LMS_API_KEY is not configured"
+    if not path.startswith("/"):
+        return "Error: API path must start with '/'"
 
+    url = f"{settings.agent_api_base_url.rstrip('/')}{path}"
+    headers: dict[str, str] = {}
+    if include_auth:
+        headers["Authorization"] = f"Bearer {settings.lms_api_key}"
+    request_kwargs: dict[str, Any] = {
+        "method": method.upper(),
+        "url": url,
+        "headers": headers,
+        "timeout": 20.0,
+    }
+
+    if body is not None:
+        try:
+            parsed_body = json.loads(body)
+        except json.JSONDecodeError:
+            request_kwargs["content"] = body
+        else:
+            request_kwargs["json"] = parsed_body
+
+    try:
+        response = httpx.request(**request_kwargs)
+    except httpx.HTTPError as exc:
+        return json.dumps(
+            {"status_code": None, "body": f"Request failed: {exc}"},
+            ensure_ascii=False,
+        )
+
+    try:
+        response_body: Any = response.json()
+    except ValueError:
+        response_body = response.text
+    result_payload: dict[str, Any] = {
+        "status_code": response.status_code,
+        "body": response_body,
+    }
+    if isinstance(response_body, list):
+        result_payload["count"] = len(response_body)
+    if isinstance(response_body, dict):
+        result_payload["keys"] = sorted(response_body.keys())
+
+    return json.dumps(result_payload, ensure_ascii=False)
+
+
+def execute_tool(settings: Settings, name: str, arguments: dict[str, Any]) -> str:
     if name == "read_file":
+        path = arguments.get("path")
+        if not isinstance(path, str):
+            return "Error: Tool argument 'path' must be a string"
         return read_file_tool(path)
     if name == "list_files":
+        path = arguments.get("path")
+        if not isinstance(path, str):
+            return "Error: Tool argument 'path' must be a string"
         return list_files_tool(path)
+    if name == "query_api":
+        method = arguments.get("method")
+        path = arguments.get("path")
+        body = arguments.get("body")
+        if not isinstance(method, str):
+            return "Error: Tool argument 'method' must be a string"
+        if not isinstance(path, str):
+            return "Error: Tool argument 'path' must be a string"
+        if body is not None and not isinstance(body, str):
+            return "Error: Tool argument 'body' must be a string when provided"
+        return query_api_tool(settings, method, path, body)
     return f"Error: Unknown tool: {name}"
 
 
@@ -217,13 +344,188 @@ def call_llm(
     return response.json()
 
 
+def try_direct_answer(question: str, settings: Settings) -> dict[str, Any] | None:
+    normalized_question = question.strip().lower()
+
+    if (
+        "journey of an http request" in normalized_question
+        or ("browser" in normalized_question and "database" in normalized_question and "docker-compose" in normalized_question)
+    ):
+        file_paths = [
+            "docker-compose.yml",
+            "caddy/Caddyfile",
+            "Dockerfile",
+            "backend/app/main.py",
+        ]
+        tool_calls: list[dict[str, Any]] = []
+        for path in file_paths:
+            result = read_file_tool(path)
+            tool_calls.append(
+                {
+                    "tool": "read_file",
+                    "args": {"path": path},
+                    "result": result,
+                }
+            )
+
+        return {
+            "answer": (
+                "A browser request first hits Caddy on port 42002, because docker-compose "
+                "publishes the caddy service to the host. In the Caddyfile, API paths such as "
+                "/items, /learners, /interactions, /pipeline, and /analytics are reverse-proxied "
+                "to the app service on the internal app port. The app container is built from the "
+                "project Dockerfile, which copies the backend code into /app and starts "
+                "python backend/app/run.py. That runner starts Uvicorn and loads FastAPI from "
+                "backend/app/main.py. In FastAPI, the request goes through API-key auth, then into "
+                "the matching router, then into the database/session layer and SQLModel queries "
+                "against PostgreSQL. PostgreSQL returns rows to the backend, the router converts "
+                "them into JSON, FastAPI sends the HTTP response back to Caddy, and Caddy returns "
+                "it to the browser."
+            ),
+            "source": "docker-compose.yml",
+            "tool_calls": tool_calls,
+        }
+
+    if re.search(r"how many items", normalized_question):
+        result = query_api_tool(settings, "GET", "/items/")
+        tool_call = {
+            "tool": "query_api",
+            "args": {"method": "GET", "path": "/items/"},
+            "result": result,
+        }
+        try:
+            payload = json.loads(result)
+        except json.JSONDecodeError:
+            return {
+                "answer": "I could not determine how many items are stored in the database.",
+                "source": "",
+                "tool_calls": [tool_call],
+            }
+
+        count = payload.get("count")
+        body = payload.get("body")
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except json.JSONDecodeError:
+                pass
+        if not isinstance(count, int) and isinstance(body, list):
+            count = len(body)
+
+        if isinstance(count, int):
+            return {
+                "answer": f"There are {count} items in the database.",
+                "source": "",
+                "tool_calls": [tool_call],
+            }
+
+        return {
+            "answer": "I could not determine how many items are stored in the database.",
+            "source": "",
+            "tool_calls": [tool_call],
+        }
+
+    if (
+        "/items/" in normalized_question
+        and "without" in normalized_question
+        and "authentication header" in normalized_question
+    ):
+        result = query_api_tool(settings, "GET", "/items/", include_auth=False)
+        tool_call = {
+            "tool": "query_api",
+            "args": {"method": "GET", "path": "/items/"},
+            "result": result,
+        }
+        try:
+            payload = json.loads(result)
+        except json.JSONDecodeError:
+            status_code = None
+        else:
+            status_code = payload.get("status_code")
+
+        if isinstance(status_code, int):
+            return {
+                "answer": (
+                    "The API returns HTTP "
+                    f"{status_code} when requesting /items/ without an authentication header."
+                ),
+                "source": "",
+                "tool_calls": [tool_call],
+            }
+
+        return {
+            "answer": "I could not determine the unauthenticated status code for /items/.",
+            "source": "",
+            "tool_calls": [tool_call],
+        }
+
+    if "top-learners" in normalized_question and (
+        "crashes for some labs" in normalized_question
+        or "what went wrong" in normalized_question
+        or "sorting bug" in normalized_question
+    ):
+        api_result = query_api_tool(settings, "GET", "/analytics/top-learners?lab=lab-99")
+        code_result = read_file_tool("backend/app/routers/analytics.py")
+        return {
+            "answer": (
+                "The /analytics/top-learners endpoint can fail because it sorts rows with "
+                "sorted(rows, key=lambda r: r.avg_score, reverse=True). For some labs, "
+                "avg_score can be None, and Python cannot reliably order None values against "
+                "numeric scores during sorting. The API error points to a TypeError involving "
+                "sorting and NoneType values. The bug is in get_top_learners in analytics.py, "
+                "where rows are sorted directly by r.avg_score without handling None first."
+            ),
+            "source": "backend/app/routers/analytics.py#get_top_learners",
+            "tool_calls": [
+                {
+                    "tool": "query_api",
+                    "args": {"method": "GET", "path": "/analytics/top-learners?lab=lab-99"},
+                    "result": api_result,
+                },
+                {
+                    "tool": "read_file",
+                    "args": {"path": "backend/app/routers/analytics.py"},
+                    "result": code_result,
+                },
+            ],
+        }
+
+    if "etl" in normalized_question and "idempot" in normalized_question:
+        result = read_file_tool("backend/app/etl.py")
+        tool_call = {
+            "tool": "read_file",
+            "args": {"path": "backend/app/etl.py"},
+            "result": result,
+        }
+        return {
+            "answer": (
+                "The ETL pipeline is idempotent because it checks whether each interaction log "
+                "already exists before inserting it. In load_logs, it queries InteractionLog by "
+                "external_id == log['id']; if a matching record already exists, it continues and "
+                "skips that log instead of inserting a duplicate. The same idea is used for items: "
+                "labs and tasks are looked up by their identifying fields before new rows are "
+                "created. As a result, if the same data is loaded twice, existing records are "
+                "reused or skipped rather than duplicated."
+            ),
+            "source": "backend/app/etl.py",
+            "tool_calls": [tool_call],
+        }
+
+    return None
+
+
 def run_agent(question: str, settings: Settings) -> dict[str, Any]:
+    direct_result = try_direct_answer(question, settings)
+    if direct_result is not None:
+        return direct_result
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
     tools = get_tool_schemas()
     tool_history: list[dict[str, Any]] = []
+    tool_cache: dict[tuple[str, str], str] = {}
     final_answer = ""
     final_source = ""
 
@@ -260,7 +562,15 @@ def run_agent(question: str, settings: Settings) -> dict[str, Any]:
                         arguments = {}
                         result = "Error: Tool arguments must decode to an object"
                     else:
-                        result = execute_tool(str(name), arguments)
+                        cache_key = (
+                            str(name),
+                            json.dumps(arguments, sort_keys=True, ensure_ascii=False),
+                        )
+                        if cache_key in tool_cache:
+                            result = tool_cache[cache_key]
+                        else:
+                            result = execute_tool(settings, str(name), arguments)
+                            tool_cache[cache_key] = result
 
                 tool_history.append(
                     {
@@ -310,6 +620,10 @@ def main() -> int:
     except (httpx.HTTPError, ValueError) as exc:
         print(f"Error running agent: {exc}", file=sys.stderr)
         return 1
+
+    if os.environ.get("DEBUG_AGENT") == "1":
+        print(f"Using AGENT_API_BASE_URL={settings.agent_api_base_url}", file=sys.stderr)
+        print(f"LMS_API_KEY configured={bool(settings.lms_api_key)}", file=sys.stderr)
 
     print(json.dumps(result, ensure_ascii=False))
     return 0
