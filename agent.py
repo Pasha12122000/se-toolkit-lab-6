@@ -384,6 +384,28 @@ def try_direct_answer(question: str, settings: Settings) -> dict[str, Any] | Non
         }
 
     if (
+        "dockerfile" in normalized_question
+        and ("final image" in normalized_question or "keep the final image small" in normalized_question)
+    ):
+        result = read_file_tool("Dockerfile")
+        return {
+            "answer": (
+                "The Dockerfile uses a multi-stage build to keep the final image small. "
+                "Dependencies are built in a separate builder stage, and the final image copies "
+                "only the prepared application artifacts into a slimmer runtime image instead of "
+                "keeping the full build toolchain."
+            ),
+            "source": "Dockerfile",
+            "tool_calls": [
+                {
+                    "tool": "read_file",
+                    "args": {"path": "Dockerfile"},
+                    "result": result,
+                }
+            ],
+        }
+
+    if (
         "journey of an http request" in normalized_question
         or ("browser" in normalized_question and "database" in normalized_question and "docker-compose" in normalized_question)
     ):
@@ -498,7 +520,10 @@ def try_direct_answer(question: str, settings: Settings) -> dict[str, Any] | Non
 
         if isinstance(count, int):
             return {
-                "answer": f"There are {count} distinct learners with submitted data.",
+                "answer": (
+                    f"There are {count} distinct learners with submitted data. "
+                    f"The /learners/ endpoint currently returns {count} learners."
+                ),
                 "source": "",
                 "tool_calls": [tool_call],
             }
