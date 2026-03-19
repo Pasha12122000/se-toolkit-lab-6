@@ -8,6 +8,7 @@ Extend the Task 2 documentation agent with a `query_api` tool so it can answer b
 
 ### `query_api`
 
+
 - Parameters:
   - `method` — HTTP method such as `GET`
   - `path` — API path such as `/items/`
