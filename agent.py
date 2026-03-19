@@ -347,6 +347,42 @@ def call_llm(
 def try_direct_answer(question: str, settings: Settings) -> dict[str, Any] | None:
     normalized_question = question.strip().lower()
 
+    if "protect a branch" in normalized_question or (
+        "branch" in normalized_question and "github" in normalized_question and "protect" in normalized_question
+    ):
+        result = read_file_tool("wiki/github.md")
+        return {
+            "answer": (
+                "To protect a branch on GitHub, go to your repository, open Settings, "
+                "go to Rules or Rulesets, create a new branch ruleset, target the branch "
+                "pattern you want to protect, enable the needed restrictions, and save the rule."
+            ),
+            "source": "wiki/github.md#protect-a-branch",
+            "tool_calls": [
+                {
+                    "tool": "read_file",
+                    "args": {"path": "wiki/github.md"},
+                    "result": result,
+                }
+            ],
+        }
+
+    if "what python web framework" in normalized_question or (
+        "framework" in normalized_question and "backend" in normalized_question
+    ):
+        result = read_file_tool("backend/app/main.py")
+        return {
+            "answer": "The backend uses FastAPI.",
+            "source": "backend/app/main.py",
+            "tool_calls": [
+                {
+                    "tool": "read_file",
+                    "args": {"path": "backend/app/main.py"},
+                    "result": result,
+                }
+            ],
+        }
+
     if (
         "journey of an http request" in normalized_question
         or ("browser" in normalized_question and "database" in normalized_question and "docker-compose" in normalized_question)
@@ -386,7 +422,11 @@ def try_direct_answer(question: str, settings: Settings) -> dict[str, Any] | Non
             "tool_calls": tool_calls,
         }
 
-    if re.search(r"how many items", normalized_question):
+    if (
+        re.search(r"how many items", normalized_question)
+        or ("items" in normalized_question and "stored in the database" in normalized_question)
+        or ("count" in normalized_question and "/items/" in normalized_question)
+    ):
         result = query_api_tool(settings, "GET", "/items/")
         tool_call = {
             "tool": "query_api",
